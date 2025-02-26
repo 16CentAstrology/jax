@@ -12,23 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
-from typing import Any, Callable, Optional, Tuple
+from __future__ import annotations
 
-from jax import linear_util as lu
-from jax.interpreters import ad
-from jax.interpreters import mlir
-from jax.interpreters import partial_eval as pe
-from jax.interpreters import xla
-from jax.tree_util import (tree_flatten, tree_leaves, tree_map,
-                           tree_structure, treedef_tuple, tree_unflatten)
+from collections.abc import Callable
+import functools
+from typing import Any
+
 from jax._src import ad_util
 from jax._src import api_util
 from jax._src import core
 from jax._src import custom_api_util
+from jax._src import linear_util as lu
 from jax._src import source_info_util
 from jax._src import traceback_util
 from jax._src import util
+from jax._src.interpreters import ad
+from jax._src.interpreters import mlir
+from jax._src.interpreters import partial_eval as pe
+from jax._src.interpreters import xla
+from jax._src.tree_util import (tree_flatten, tree_leaves, tree_map,
+                                tree_structure, treedef_tuple, tree_unflatten,
+                                PyTreeDef)
 
 
 source_info_util.register_exclusion(__file__)
@@ -51,13 +55,13 @@ class StoreEqual(lu.Store):
 
 @util.curry
 def transformation_with_aux(
-    gen, fun: lu.WrappedFun, *gen_static_args) -> Tuple[lu.WrappedFun, Any]:
+    gen, fun: lu.WrappedFun, *gen_static_args) -> tuple[lu.WrappedFun, Any]:
   out_store = StoreEqual()
   out_thunk = lambda: out_store.val
   return fun.wrap(gen, gen_static_args, out_store), out_thunk
 
 flatten_fun_nokwargs = transformation_with_aux(
-    api_util.flatten_fun_nokwargs.args[0])  # type: ignore[has-type]
+    api_util.flatten_fun_nokwargs.args[0])
 
 
 ### api
@@ -65,11 +69,11 @@ flatten_fun_nokwargs = transformation_with_aux(
 @custom_api_util.register_custom_decorator_type
 class custom_transpose:
   fun: Callable
-  transpose: Optional[Callable] = None
+  transpose: Callable | None = None
 
   def __init__(self, fun: Callable):
     functools.update_wrapper(self, fun)
-    self.fun = fun  # type: ignore[assignment]
+    self.fun = fun
 
   __getattr__ = custom_api_util.forward_attr
 
@@ -87,10 +91,20 @@ class custom_transpose:
     # TODO(frostig,mattjj): could, and should, we avoid flattening
     # self.fun at this point?
 
-    flat_fun, out_tree2 = flatten_fun_nokwargs(lu.wrap_init(self.fun), in_tree)
+    flat_fun, out_tree2 = flatten_fun_nokwargs(
+        lu.wrap_init(
+            self.fun,
+            debug_info=api_util.debug_info("custom_transpose fun", self.fun,
+                                           (res_arg, lin_arg), {})),
+        in_tree)
     out_types_flat, out_tree = tree_flatten(out_types)
+    transpose_wrapped = lu.wrap_init(
+        self.transpose,
+        debug_info=api_util.debug_info("custom_transpose transpose_fun",
+                                       self.transpose,
+                                       (res_arg, out_types), {})                             )
     out_flat = custom_transpose_p.bind(flat_fun, *args_flat,
-                                       transpose=self.transpose,
+                                       transpose=transpose_wrapped,
                                        out_types=out_types_flat,
                                        lin_tree=lin_tree,
                                        res_tree=res_tree,
@@ -122,19 +136,20 @@ def is_treedef_prefix(entire, prefix):
 def rule_name(rule):
   return getattr(rule, '__name__', '<unnamed transpose rule>')
 
-def check_transpose_rule_trees(rule, lin_tree, rule_out_tree):
+def check_transpose_rule_trees(rule: lu.WrappedFun,
+                               lin_tree: PyTreeDef,
+                               rule_out_tree: PyTreeDef):
   if not is_treedef_prefix(lin_tree, rule_out_tree):
-    if hasattr(rule, '_transpose_type_error'):
-      raise rule._transpose_type_error(lin_tree, rule_out_tree)
-    else:
-      raise TypeError(
-          'structure of custom transpose rule\'s output does not prefix-match '
-          'structure of primal function\'s linear inputs under '
-          f'custom transpose rule ({rule_name(rule)}).\n'
-          f'Transpose rule output: {rule_out_tree}\n'
-          f'Linear primal inputs: {lin_tree}')
+    rule_name = rule.debug_info.func_src_info if rule.debug_info else "<unknown>"
+    raise TypeError(
+        'structure of custom transpose rule\'s output does not prefix-match '
+        'structure of primal function\'s linear inputs under '
+        f'custom transpose rule ({rule_name}).\n'
+        f'Transpose rule output: {rule_out_tree}\n'
+        f'Linear primal inputs: {lin_tree}')
 
-def make_transpose_from_thunk(thunk, lin_tree):
+def make_transpose_from_thunk(thunk: Callable,
+                              lin_tree: PyTreeDef) -> lu.WrappedFun:
   transpose_jaxpr, transpose_consts = thunk()
   transpose_jaxpr = core.ClosedJaxpr(
       pe.convert_constvars_jaxpr(transpose_jaxpr), ())
@@ -142,7 +157,7 @@ def make_transpose_from_thunk(thunk, lin_tree):
     args_flat = tree_leaves((res_arg, ct_out))
     ct_ins = core.jaxpr_as_fun(transpose_jaxpr)(*transpose_consts, *args_flat)
     return tree_unflatten(lin_tree, ct_ins)
-  return transpose
+  return lu.wrap_init(transpose, debug_info=transpose_jaxpr.jaxpr.debug_info)
 
 
 ### custom_transpose primitive and rules
@@ -152,41 +167,37 @@ class CustomTransposePrimitive(core.Primitive):
   map_primitive = False
   multiple_results = True
 
-  def bind(self, call, *args, **params):
-    # TODO(frostig,mattjj): This doesn't handle closures yet, which is
-    # a bit involved. Closures are complicated by us binding `call`
-    # twice in the JVP rule for custom transpose. The `env_trace_todo`
-    # output by `process_env_traces` due to one of those two bindings
-    # should be passable to the other, and need to be passed onward
-    # since the second bind is deferred by partial eval (since it
-    # typically receives unknowns)
-    top_trace = core.find_top_trace(args)
-    tracers = map(top_trace.full_raise, args)
-    outs = top_trace.process_custom_transpose(self, call, tracers, **params)
-    return outs
+  def bind(self, *args, **params):
+    return self._true_bind(*args, **params)
+
+  def bind_with_trace(self, trace, call_args, params):
+    call, tracers = call_args[0], call_args[1:]
+    return trace.process_custom_transpose(self, call, tracers, **params)
 
   # TODO(frostig,mattjj): consider keeping `call` as a named parameter
   # instead of following this "call primitive" convention.
   def get_bind_params(self, params):
     assert 'call_jaxpr' in params
     assert 'transpose_jaxpr_thunk' in params
-    new_params = dict(params)
+    new_params: dict[str, Any] = dict(params)
     new_params['transpose'] = make_transpose_from_thunk(
         new_params.pop('transpose_jaxpr_thunk'),
         new_params['lin_tree'])
-    call = lu.wrap_init(core.jaxpr_as_fun(new_params.pop('call_jaxpr')))
+    call_jaxpr: core.ClosedJaxpr = new_params.pop('call_jaxpr')
+    call = lu.wrap_init(core.jaxpr_as_fun(call_jaxpr),
+                        debug_info=call_jaxpr.jaxpr.debug_info)
     return [call], new_params
 
 
 # TODO(frostig,mattjj): reinstate checks
-def custom_transpose_typecheck(*in_atoms, out_types, **params):
+def custom_transpose_typecheck(_, *in_atoms, out_types, **params):
   del in_atoms, params
   return out_types, core.no_effects
 
 
 def custom_transpose_transpose_rule(
     cts, *args, out_types, res_tree, lin_tree, out_tree, **params):
-
+  transpose: lu.WrappedFun
   if 'transpose_jaxpr_thunk' in params:
     assert 'call_jaxpr' in params
     transpose = make_transpose_from_thunk(
@@ -208,7 +219,7 @@ def custom_transpose_transpose_rule(
   cts = [ad_util.zeros_like_aval(ct.aval) if type(ct) is ad_util.Zero else ct
          for ct in cts]
   ct_out = tree_unflatten(out_tree, cts)
-  ct_lin = transpose(res_arg, ct_out)
+  ct_lin = transpose.call_wrapped(res_arg, ct_out)
   check_transpose_rule_trees(transpose, lin_tree, tree_structure(ct_lin))
   ct_lin_flat, _ = tree_flatten(
       tree_broadcast(lin_tree, ct_lin, is_leaf=lambda x: x is None),

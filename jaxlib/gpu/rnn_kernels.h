@@ -18,7 +18,8 @@ limitations under the License.
 
 #include "absl/status/statusor.h"
 #include "jaxlib/gpu/vendor.h"
-#include "tensorflow/compiler/xla/service/custom_call_status.h"
+#include "xla/ffi/api/ffi.h"
+#include "xla/service/custom_call_status.h"
 
 namespace jax {
 namespace JAX_GPU_NAMESPACE {
@@ -31,7 +32,8 @@ struct RnnDescriptor {
   int batch_size;
   int max_seq_length;
   float dropout;
-  bool bidirectional;
+  int bidirectional;
+  int cudnn_allow_tf32;
   int workspace_size;
   int reserve_space_size;
 };
@@ -39,13 +41,17 @@ struct RnnDescriptor {
 // Return (workspace size, reserve space size).
 absl::StatusOr<std::pair<int, int>> RnnComputeWorkspaceReserveSpaceSizes(
     int input_size, int hidden_size, int num_layers, int batch_size,
-    int max_seq_length, float dropout, bool bidirectional);
+    int max_seq_length, float dropout, bool bidirectional,
+    bool cudnn_allow_tf32);
 
-void RNNForward(gpuStream_t stream, void** buffers, const char* opaque,
-                size_t opaque_len, XlaCustomCallStatus* status);
+void RNNForward(gpuStream_t stream, void **buffers, const char *opaque,
+                size_t opaque_len, XlaCustomCallStatus *status);
 
-void RNNBackward(gpuStream_t stream, void** buffers, const char* opaque,
-                 size_t opaque_len, XlaCustomCallStatus* status);
+void RNNBackward(gpuStream_t stream, void **buffers, const char *opaque,
+                 size_t opaque_len, XlaCustomCallStatus *status);
+
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RNNForwardFfi);
+XLA_FFI_DECLARE_HANDLER_SYMBOL(RNNBackwardFfi);
 
 }  // namespace JAX_GPU_NAMESPACE
 }  // namespace jax

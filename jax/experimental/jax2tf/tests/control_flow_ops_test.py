@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Tests for the jax2tf conversion for control-flow primitives."""
-import unittest
 
 from absl.testing import absltest
 
@@ -24,8 +23,7 @@ import numpy as np
 
 from jax.experimental.jax2tf.tests import tf_test_util
 
-from jax.config import config
-config.parse_flags_with_absl()
+jax.config.parse_flags_with_absl()
 
 
 class ControlFlowOpsTest(tf_test_util.JaxToTfTestCase):
@@ -147,7 +145,7 @@ class ControlFlowOpsTest(tf_test_util.JaxToTfTestCase):
       # of the lax.while primitive.
       def cond(idx_carry):
         i, c = idx_carry
-        return i < jnp.sum(lax.tie_in(i, cond_const))  # Capture cond_const
+        return i < jnp.sum(cond_const)  # Capture cond_const
 
       def body(idx_carry):
         i, c = idx_carry

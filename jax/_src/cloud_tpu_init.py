@@ -12,11 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import datetime
 import os
+import re
+from jax import version
+from jax._src import config
+from jax._src import hardware_utils
 
-running_in_cloud_tpu_vm = False
+running_in_cloud_tpu_vm: bool = False
 
-def cloud_tpu_init():
+
+def maybe_import_libtpu():
+  try:
+    # pylint: disable=import-outside-toplevel
+    # pytype: disable=import-error
+    import libtpu
+
+    # pytype: enable=import-error
+    # pylint: enable=import-outside-toplevel
+  except ImportError:
+    return None
+  else:
+    return libtpu
+
+
+def get_tpu_library_path() -> str | None:
+  path_from_env = os.getenv("TPU_LIBRARY_PATH")
+  if path_from_env is not None and os.path.isfile(path_from_env):
+    return path_from_env
+
+  libtpu_module = maybe_import_libtpu()
+  if libtpu_module is not None:
+    return libtpu_module.get_library_path()
+
+  return None
+
+
+def jax_force_tpu_init() -> bool:
+  return 'JAX_FORCE_TPU_INIT' in os.environ
+
+
+def cloud_tpu_init() -> None:
   """Automatically sets Cloud TPU topology and other env vars.
 
   **This must be called before the TPU runtime is loaded, which happens as soon
@@ -33,84 +69,53 @@ def cloud_tpu_init():
   set.
   """
   global running_in_cloud_tpu_vm
-  try:
-    # pylint: disable=import-outside-toplevel
-    # pytype: disable=import-error
-    import libtpu
-    # pytype: enable=import-error
-    # pylint: enable=import-outside-toplevel
-  except ImportError:
-    # We assume libtpu is installed iff we're in a correctly-configured Cloud
-    # TPU environment. Exit early if we're not running on Cloud TPU.
+
+  # Exit early if we're not running on a Cloud TPU VM or libtpu isn't installed.
+  libtpu_path = get_tpu_library_path()
+  num_tpu_chips = hardware_utils.num_available_tpu_chips_and_device_id()[0]
+  if (libtpu_path is None or num_tpu_chips == 0) and not jax_force_tpu_init():
     return
 
   running_in_cloud_tpu_vm = True
 
-  libtpu.configure_library_path()
   os.environ.setdefault('GRPC_VERBOSITY', 'ERROR')
-  os.environ.setdefault('JAX_PLATFORMS', 'tpu,cpu')
-  os.environ['TPU_ML_PLATFORM'] = 'JAX'
+  os.environ.setdefault('TPU_ML_PLATFORM', 'JAX')
+  os.environ.setdefault('TPU_ML_PLATFORM_VERSION', version.__version__)
+  os.environ.setdefault('ENABLE_RUNTIME_UPTIME_TELEMETRY', '1')
+  if '--xla_tpu_use_enhanced_launch_barrier' not in os.environ.get('LIBTPU_INIT_ARGS', ''):
+    os.environ['LIBTPU_INIT_ARGS'] = os.environ.get('LIBTPU_INIT_ARGS','') + ' --xla_tpu_use_enhanced_launch_barrier=true'
 
-  # If the user has set any topology-related env vars, don't set any
-  # automatically.
-  if any([
-      os.environ.get('CLOUD_TPU_TASK_ID', None),
-      os.environ.get('TPU_CHIPS_PER_HOST_BOUNDS', None),
-      os.environ.get('TPU_HOST_BOUNDS', None),
-      os.environ.get('TPU_MESH_CONTROLLER_ADDRESS', None),
-      os.environ.get('TPU_MESH_CONTROLLER_PORT', None),
-      os.environ.get('TPU_VISIBLE_DEVICES', None),
-  ]):
-    return
+  # this makes tensorstore serialization work better on TPU
+  os.environ.setdefault('TENSORSTORE_CURL_LOW_SPEED_TIME_SECONDS', '60')
+  os.environ.setdefault('TENSORSTORE_CURL_LOW_SPEED_LIMIT_BYTES', '256')
 
-  worker_id = get_metadata('agent-worker-number')
-  accelerator_type = get_metadata('accelerator-type')
+  # If the JAX_PLATFORMS env variable isn't set, config.jax_platforms defaults
+  # to None. In this case, we set it to 'tpu,cpu' to ensure that JAX uses the
+  # TPU backend.
+  if config.jax_platforms.value is None:
+    config.update('jax_platforms', 'tpu,cpu')
 
-  accelerator_type_to_host_bounds = {
-      'v2-8': '1,1,1',
-      'v2-32': '2,2,1',
-      'v2-128': '4,4,1',
-      'v2-256': '4,8,1',
-      'v2-512': '8,8,1',
-      'v3-8': '1,1,1',
-      'v3-32': '2,2,1',
-      'v3-64': '2,4,1',
-      'v3-128': '4,4,1',
-      'v3-256': '4,8,1',
-      'v3-512': '8,8,1',
-      'v3-1024': '8,16,1',
-      'v3-2048': '16,16,1',
-  }
-
-  os.environ['CLOUD_TPU_TASK_ID'] = worker_id
-
-  # If v4 TPU don't set any topology related flags, libtpu will set these values.
-  if not accelerator_type.startswith('v4-'):
-    os.environ['TPU_CHIPS_PER_HOST_BOUNDS'] = '2,2,1'
-    os.environ['TPU_HOST_BOUNDS'] = accelerator_type_to_host_bounds[
-        accelerator_type]
+  if config.jax_pjrt_client_create_options.value is None:
+    config.update(
+      'jax_pjrt_client_create_options',
+      f'ml_framework_name:JAX;ml_framework_version:{version.__version__}'
+      )
 
 
-def get_metadata(key):
-  import requests  # pytype: disable=import-error
-  import time  # pytype: disable=import-error
-  # Based on https://github.com/tensorflow/tensorflow/pull/40317
-  gce_metadata_endpoint = 'http://' + os.environ.get(
-      'GCE_METADATA_IP', 'metadata.google.internal')
-
-  retry_count = 0
-  retrySeconds = 0.500
-  api_resp = None
-
-  while retry_count < 6:
-    api_resp = requests.get(
-        f'{gce_metadata_endpoint}/computeMetadata/v1/instance/attributes/{key}',
-        headers={'Metadata-Flavor': 'Google'})
-    if api_resp.status_code == 200:
-      break
-    retry_count += 1
-    time.sleep(retrySeconds)
-
-  if api_resp is None:
-    raise RuntimeError(f"Getting metadata['{key}'] failed for 6 tries")
-  return api_resp.text
+def is_cloud_tpu_older_than(year: int, month: int, day: int):
+  # We import locally because the functions above must run before the runtime
+  # modules are imported.
+  from jax._src import xla_bridge  # pytype: disable=import-error
+  date = datetime.date(year, month, day)
+  if not running_in_cloud_tpu_vm:
+    return False
+  # The format of Cloud TPU platform_version is like:
+  # PJRT C API
+  # TFRT TPU v2
+  # Built on Oct 30 2023 03:04:42 (1698660263) cl/577737722
+  platform_version = xla_bridge.get_backend().platform_version.split('\n')[-1]
+  results = re.findall(r'\(.*?\)', platform_version)
+  if len(results) != 1:
+    return True
+  build_date = date.fromtimestamp(int(results[0][1:-1]))
+  return build_date < date

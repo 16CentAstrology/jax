@@ -1,5 +1,5 @@
 
-jax.nn package
+``jax.nn`` module
 =================
 
 .. currentmodule:: jax.nn
@@ -13,7 +13,7 @@ jax.nn package
 
 
 Activation functions
-------------------------
+--------------------
 
 .. autosummary::
   :toctree: _autosummary
@@ -22,6 +22,8 @@ Activation functions
     relu6
     sigmoid
     softplus
+    sparse_plus
+    sparse_sigmoid
     soft_sign
     silu
     swish
@@ -36,6 +38,8 @@ Activation functions
     selu
     gelu
     glu
+    squareplus
+    mish
 
 Other functions
 ---------------
@@ -48,3 +52,4 @@ Other functions
     logsumexp
     standardize
     one_hot
+    dot_product_attention

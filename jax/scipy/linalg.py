@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Note: import <name> as <name> is required for names to be exported.
-# See PEP 484 & https://github.com/google/jax/issues/7570
+# See PEP 484 & https://github.com/jax-ml/jax/issues/7570
 
 from jax._src.scipy.linalg import (
   block_diag as block_diag,
@@ -26,12 +26,12 @@ from jax._src.scipy.linalg import (
   expm as expm,
   expm_frechet as expm_frechet,
   hessenberg as hessenberg,
+  hilbert as hilbert,
   inv as inv,
   lu as lu,
   lu_factor as lu_factor,
   lu_solve as lu_solve,
   polar as polar,
-  polar_unitary as polar_unitary,
   qr as qr,
   rsf2csf as rsf2csf,
   schur as schur,
@@ -40,8 +40,6 @@ from jax._src.scipy.linalg import (
   solve_triangular as solve_triangular,
   svd as svd,
   toeplitz as toeplitz,
-  tril as tril,
-  triu as triu,
 )
 
 from jax._src.third_party.scipy.linalg import (

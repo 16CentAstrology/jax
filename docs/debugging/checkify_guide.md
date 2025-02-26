@@ -1,6 +1,8 @@
 # The `checkify` transformation
 
-**TL;DR** Checkify lets you add `jit`-able runtime error checking (e.g. out of bounds indexing) to your JAX code. Use the `checkify.checkify` transformation together with the assert-like `checkify.check` function to add runtime checks to JAX code:
+<!--* freshness: { reviewed: '2023-02-28' } *-->
+
+**Summary:** Checkify lets you add `jit`-able runtime error checking (e.g. out of bounds indexing) to your JAX code. Use the `checkify.checkify` transformation together with the assert-like `checkify.check` function to add runtime checks to JAX code:
 
 ```python
 from jax.experimental import checkify
@@ -187,7 +189,7 @@ def f(x, i):
   checkify.check(i >= 0, "index needs to be non-negative!")
   return x[i]
 
-checked_f = checkify.checkify(f, errors=checkify.all_errors)
+checked_f = checkify.checkify(f, errors=checkify.all_checks)
 errs, out = jax.vmap(checked_f)(jnp.ones((3, 5)), jnp.array([-1, 2, 100]))
 errs.throw()
 """
@@ -205,7 +207,7 @@ def f(x, i):
   checkify.check(i >= 0, "index needs to be non-negative!")
   return x[i]
 
-checked_f = checkify.checkify(f, errors=checkify.all_errors)
+checked_f = checkify.checkify(f, errors=checkify.all_checks)
 err, out = checked_f(jnp.ones((3, 5)), jnp.array([-1, 2, 100]))
 err.throw()
 # ValueError: index needs to be non-negative! (check failed at <...>:2 (f))
@@ -223,10 +225,10 @@ def f(x):
 f = checkify.checkify(f, errors=checkify.float_checks)
 f = pjit(
   f,
-  in_axis_resources=PartitionSpec('x', None),
-  out_axis_resources=(None, PartitionSpec('x', None)))
+  in_shardings=PartitionSpec('x', None),
+  out_shardings=(None, PartitionSpec('x', None)))
 
-with maps.Mesh(mesh.devices, mesh.axis_names):
+with jax.sharding.Mesh(mesh.devices, mesh.axis_names):
  err, data = f(input_data)
 err.throw()
 # ValueError: divided by zero at <...>:4 (f)

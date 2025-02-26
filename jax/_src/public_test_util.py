@@ -15,12 +15,11 @@
 from functools import partial
 import operator
 
-from jax import config
-from jax.tree_util import tree_map, tree_reduce
 from jax._src import api
+from jax._src import config
 from jax._src import dtypes as _dtypes
-from jax._src.config import flags
-from jax._src.lib import xla_bridge
+from jax._src.tree_util import tree_map, tree_reduce
+
 import numpy as np
 
 
@@ -29,8 +28,6 @@ import numpy as np
 # and may be changed or removed at any time and without any deprecation cycle.
 __all__ = ['check_grads', 'check_jvp', 'check_vjp']
 
-
-FLAGS = flags.FLAGS
 
 EPS = 1e-4
 
@@ -45,35 +42,46 @@ def _dtype(x):
 
 
 _default_tolerance = {
-  _dtypes.float0: 0,
-  np.dtype(np.bool_): 0,
-  np.dtype(np.int8): 0,
-  np.dtype(np.int16): 0,
-  np.dtype(np.int32): 0,
-  np.dtype(np.int64): 0,
-  np.dtype(np.uint8): 0,
-  np.dtype(np.uint16): 0,
-  np.dtype(np.uint32): 0,
-  np.dtype(np.uint64): 0,
-  np.dtype(_dtypes.bfloat16): 1e-2,
-  np.dtype(np.float16): 1e-3,
-  np.dtype(np.float32): 1e-6,
-  np.dtype(np.float64): 1e-15,
-  np.dtype(np.complex64): 1e-6,
-  np.dtype(np.complex128): 1e-15,
+    _dtypes.float0: 0,
+    np.dtype(np.bool_): 0,
+    np.dtype(_dtypes.int4): 0,
+    np.dtype(np.int8): 0,
+    np.dtype(np.int16): 0,
+    np.dtype(np.int32): 0,
+    np.dtype(np.int64): 0,
+    np.dtype(_dtypes.uint4): 0,
+    np.dtype(np.uint8): 0,
+    np.dtype(np.uint16): 0,
+    np.dtype(np.uint32): 0,
+    np.dtype(np.uint64): 0,
+    np.dtype(_dtypes.float8_e4m3b11fnuz): 1e-1,
+    np.dtype(_dtypes.float8_e4m3fn): 1e-1,
+    np.dtype(_dtypes.float8_e4m3fnuz): 1e-1,
+    np.dtype(_dtypes.float8_e5m2): 1e-1,
+    np.dtype(_dtypes.float8_e5m2fnuz): 1e-1,
+    np.dtype(_dtypes.bfloat16): 1e-2,
+    np.dtype(np.float16): 1e-3,
+    np.dtype(np.float32): 1e-6,
+    np.dtype(np.float64): 1e-15,
+    np.dtype(np.complex64): 1e-6,
+    np.dtype(np.complex128): 1e-15,
 }
 
+if _dtypes.int2 is not None:
+  assert _dtypes.uint2 is not None
+  _default_tolerance[np.dtype(_dtypes.int2)] = 0
+  _default_tolerance[np.dtype(_dtypes.uint2)] = 0
 
 def default_tolerance():
-  if device_under_test() != "tpu":
-    return _default_tolerance
-  tol = _default_tolerance.copy()
-  tol[np.dtype(np.float32)] = 1e-3
-  tol[np.dtype(np.complex64)] = 1e-3
-  return tol
+  return _default_tolerance
 
 
 default_gradient_tolerance = {
+  np.dtype(_dtypes.float8_e4m3b11fnuz): 1e-1,
+  np.dtype(_dtypes.float8_e4m3fn): 1e-1,
+  np.dtype(_dtypes.float8_e4m3fnuz): 1e-1,
+  np.dtype(_dtypes.float8_e5m2): 1e-1,
+  np.dtype(_dtypes.float8_e5m2fnuz): 1e-1,
   np.dtype(_dtypes.bfloat16): 1e-1,
   np.dtype(np.float16): 1e-2,
   np.dtype(np.float32): 2e-3,
@@ -82,6 +90,17 @@ default_gradient_tolerance = {
   np.dtype(np.complex128): 1e-5,
 }
 
+# TODO: make this unconditional when ml_dtypes>=0.5.0 is required
+if _dtypes.float8_e3m4 is not None:
+  _default_tolerance[np.dtype(_dtypes.float8_e3m4)] = 1e-1
+  default_gradient_tolerance[np.dtype(_dtypes.float8_e3m4)] = 1e-1
+if _dtypes.float8_e4m3 is not None:
+  _default_tolerance[np.dtype(_dtypes.float8_e4m3)] = 1e-1
+  default_gradient_tolerance[np.dtype(_dtypes.float8_e4m3)] = 1e-1
+if _dtypes.float8_e8m0fnu is not None:
+  _default_tolerance[np.dtype(_dtypes.float8_e8m0fnu)] = 1e0
+  default_gradient_tolerance[np.dtype(_dtypes.float8_e8m0fnu)] = 1e0
+
 def is_python_scalar(val):
   return not isinstance(val, np.generic) and isinstance(val, (bool, int, float, complex))
 
@@ -89,8 +108,36 @@ def _assert_numpy_allclose(a, b, atol=None, rtol=None, err_msg=''):
   if a.dtype == b.dtype == _dtypes.float0:
     np.testing.assert_array_equal(a, b, err_msg=err_msg)
     return
-  a = a.astype(np.float32) if a.dtype == _dtypes.bfloat16 else a
-  b = b.astype(np.float32) if b.dtype == _dtypes.bfloat16 else b
+
+  custom_float_dtypes = [
+    _dtypes.float8_e4m3b11fnuz,
+    _dtypes.float8_e4m3fn,
+    _dtypes.float8_e4m3fnuz,
+    _dtypes.float8_e5m2,
+    _dtypes.float8_e5m2fnuz,
+    _dtypes.bfloat16,
+  ]
+
+  if _dtypes.float8_e4m3 is not None:
+    custom_float_dtypes.insert(0, _dtypes.float8_e4m3)
+  if _dtypes.float8_e3m4 is not None:
+    custom_float_dtypes.insert(0, _dtypes.float8_e3m4)
+  if _dtypes.float8_e8m0fnu is not None:
+    custom_float_dtypes.insert(0, _dtypes.float8_e8m0fnu)
+
+  def maybe_upcast(x):
+    if x.dtype in custom_float_dtypes:
+      return x.astype(np.float32)
+    # TODO(reedwm): Upcasting int2/int4 to int8 will no longer be necessary once
+    # JAX depends on a version of ml_dtypes which contains
+    # https://github.com/jax-ml/ml_dtypes/commit/348fd3704306cae97f617c38045cee6bc416bf10.
+    if x.dtype in _dtypes._intn_dtypes:
+      return x.astype(np.int8 if _dtypes.iinfo(x.dtype).min < 0 else np.uint8)
+    return x
+
+  a = maybe_upcast(a)
+  b = maybe_upcast(b)
+
   kw = {}
   if atol: kw["atol"] = atol
   if rtol: kw["rtol"] = rtol
@@ -125,7 +172,7 @@ def check_close(xs, ys, atol=None, rtol=None, err_msg=''):
 
 def _check_dtypes_match(xs, ys):
   def _assert_dtypes_match(x, y):
-    if config.x64_enabled:
+    if config.enable_x64.value:
       assert _dtype(x) == _dtype(y)
     else:
       assert (_dtypes.canonicalize_dtype(_dtype(x)) ==
@@ -200,6 +247,25 @@ def _merge_tolerance(tol, default):
 
 
 def check_jvp(f, f_jvp, args, atol=None, rtol=None, eps=EPS, err_msg=''):
+  """Check a JVP from automatic differentiation against finite differences.
+
+  Gradients are only checked in a single randomly chosen direction, which
+  ensures that the finite difference calculation does not become prohibitively
+  expensive even for large input/output spaces.
+
+  Args:
+    f: function to check at ``f(*args)``.
+    f_vjp: function that calculates ``jax.jvp`` applied to ``f``. Typically this
+      should be ``functools.partial(jax.jvp, f))``.
+    args: tuple of argument values.
+    atol: absolute tolerance for gradient equality.
+    rtol: relative tolerance for gradient equality.
+    eps: step size used for finite differences.
+    err_msg: additional error message to include if checks fail.
+
+  Raises:
+    AssertionError: if gradients do not match.
+  """
   atol = _merge_tolerance(atol, default_gradient_tolerance)
   rtol = _merge_tolerance(rtol, default_gradient_tolerance)
   rng = np.random.RandomState(0)
@@ -219,6 +285,25 @@ def check_jvp(f, f_jvp, args, atol=None, rtol=None, eps=EPS, err_msg=''):
 
 
 def check_vjp(f, f_vjp, args, atol=None, rtol=None, eps=EPS, err_msg=''):
+  """Check a VJP from automatic differentiation against finite differences.
+
+  Gradients are only checked in a single randomly chosen direction, which
+  ensures that the finite difference calculation does not become prohibitively
+  expensive even for large input/output spaces.
+
+  Args:
+    f: function to check at ``f(*args)``.
+    f_vjp: function that calculates ``jax.vjp`` applied to ``f``. Typically this
+      should be ``functools.partial(jax.jvp, f))``.
+    args: tuple of argument values.
+    atol: absolute tolerance for gradient equality.
+    rtol: relative tolerance for gradient equality.
+    eps: step size used for finite differences.
+    err_msg: additional error message to include if checks fail.
+
+  Raises:
+    AssertionError: if gradients do not match.
+  """
   atol = _merge_tolerance(atol, default_gradient_tolerance)
   rtol = _merge_tolerance(rtol, default_gradient_tolerance)
   _rand_like = partial(rand_like, np.random.RandomState(0))
@@ -280,7 +365,3 @@ def check_grads(f, args, order,
         _check_grads(f_vjp, args, order - 1, rev_msg)
 
   _check_grads(f, args, order)
-
-
-def device_under_test():
-  return getattr(FLAGS, 'jax_test_dut', None) or xla_bridge.get_backend().platform

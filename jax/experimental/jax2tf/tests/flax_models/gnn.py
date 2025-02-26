@@ -16,9 +16,11 @@
 https://github.com/google/flax/tree/main/examples/ogbg_molpcba
 """
 
-from typing import Callable, Sequence
+from collections.abc import Callable, Sequence
 
 from flax import linen as nn
+
+import jax
 import jax.numpy as jnp
 import jraph
 
@@ -38,7 +40,7 @@ class MLP(nn.Module):
   feature_sizes: Sequence[int]
   dropout_rate: float = 0
   deterministic: bool = True
-  activation: Callable[[jnp.ndarray], jnp.ndarray] = nn.relu
+  activation: Callable[[jax.Array], jax.Array] = nn.relu
 
   @nn.compact
   def __call__(self, inputs):
@@ -131,8 +133,8 @@ class GraphConvNet(nn.Module):
   skip_connections: bool = True
   layer_norm: bool = True
   deterministic: bool = True
-  pooling_fn: Callable[[jnp.ndarray, jnp.ndarray, jnp.ndarray],
-                       jnp.ndarray] = jraph.segment_mean
+  pooling_fn: Callable[[jax.Array, jax.Array, jax.Array],
+                       jax.Array] = jraph.segment_mean
 
   def pool(self, graphs: jraph.GraphsTuple) -> jraph.GraphsTuple:
     """Pooling operation, taken from Jraph."""
@@ -149,7 +151,7 @@ class GraphConvNet(nn.Module):
         axis=0,
         total_repeat_length=sum_n_node)
     # We use the aggregation function to pool the nodes per graph.
-    pooled = self.pooling_fn(graphs.nodes, node_graph_indices, n_graph)  # type: ignore[call-arg]
+    pooled = self.pooling_fn(graphs.nodes, node_graph_indices, n_graph)
     return graphs._replace(globals=pooled)
 
   @nn.compact

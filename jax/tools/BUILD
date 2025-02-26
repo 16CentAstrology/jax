@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_python//python:defs.bzl", "py_library")
 load(
     "//jaxlib:jax.bzl",
     "py_deps",
@@ -19,11 +20,31 @@ load(
 
 licenses(["notice"])
 
-package(default_visibility = ["//visibility:public"])
+package(
+    default_applicable_licenses = [],
+    default_visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "pgo_nsys_converter",
+    srcs = [
+        "pgo_nsys_converter.py",
+    ],
+)
+
+py_library(
+    name = "colab_tpu",
+    srcs = [
+        "colab_tpu.py",
+    ],
+)
 
 py_library(
     name = "jax_to_ir",
-    srcs = ["jax_to_ir.py"],
+    srcs = [
+        "__init__.py",
+        "jax_to_ir.py",
+    ],
     tags = [
         "ignore_for_dep=third_party.py.jax.experimental.jax2tf",
         "ignore_for_dep=third_party.py.tensorflow",
@@ -39,5 +60,5 @@ py_library(
     deps = [
         "//jax",
         "//jax/experimental/jax2tf",
-    ] + py_deps("tensorflow"),
+    ] + py_deps("tensorflow_core"),
 )

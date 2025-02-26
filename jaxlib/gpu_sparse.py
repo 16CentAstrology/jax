@@ -15,7 +15,9 @@
 cusparse wrappers for performing sparse matrix computations in JAX
 """
 
+import math
 from functools import partial
+import importlib
 
 import jaxlib.mlir.ir as ir
 
@@ -23,27 +25,43 @@ import numpy as np
 
 from jaxlib import xla_client
 
-from .hlo_helpers import custom_call
+from .hlo_helpers import custom_call, mk_result_types_and_shapes
 
-try:
-  from .cuda import _sparse as _cusparse
-except ImportError:
-  _cusparse = None
-else:
+for cuda_module_name in [".cuda", "jax_cuda12_plugin"]:
+  try:
+    _cusparse = importlib.import_module(
+        f"{cuda_module_name}._sparse", package="jaxlib"
+    )
+  except ImportError:
+    _cusparse = None
+  else:
+    break
+
+if _cusparse:
   for _name, _value in _cusparse.registrations().items():
-    xla_client.register_custom_call_target(_name, _value, platform="CUDA")
+    api_version = 1 if _name.endswith("_ffi") else 0
+    xla_client.register_custom_call_target(_name, _value, platform="CUDA",
+                                           api_version=api_version)
 
-try:
-  from .rocm import _sparse as _hipsparse
-except ImportError:
-  _hipsparse = None
-else:
+for rocm_module_name in [".rocm", "jax_rocm60_plugin"]:
+  try:
+    _hipsparse = importlib.import_module(
+        f"{rocm_module_name}._sparse", package="jaxlib"
+    )
+  except ImportError:
+    _hipsparse = None
+  else:
+    break
+
+if _hipsparse:
   for _name, _value in _hipsparse.registrations().items():
-    xla_client.register_custom_call_target(_name, _value, platform="ROCM")
+    api_version = 1 if _name.endswith("_ffi") else 0
+    xla_client.register_custom_call_target(_name, _value, platform="ROCM",
+                                           api_version=api_version)
 
 
-cuda_is_supported : bool = _cusparse and _cusparse.sparse_supported
-rocm_is_supported : bool = _hipsparse and _hipsparse.sparse_supported
+cuda_is_supported = bool(_cusparse and _cusparse.sparse_supported)
+rocm_is_supported = bool(_hipsparse and _hipsparse.sparse_supported)
 
 
 def _validate_csr_hlo(data, indices, indptr, shape):
@@ -79,16 +97,17 @@ def _csr_todense_hlo(platform, gpu_sparse, data, indices, indptr, *, shape,
       data_dtype, index_dtype, rows, cols, nnz)
 
   out = custom_call(
-      f"{platform}sparse_csr_todense",
-      [
+      f"{platform}sparse_csr_todense_ffi",
+      result_types=[
           ir.RankedTensorType.get(shape, data_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [data, indices, indptr],
-      backend_config=opaque,
+      operands=[data, indices, indptr],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[0]] * 3,
-      result_layouts=[[1, 0], [0]])
+      result_layouts=[[1, 0], [0]]).results
   return out[0]
 
 cuda_csr_todense = partial(_csr_todense_hlo, "cu", _cusparse)
@@ -105,18 +124,19 @@ def _csr_fromdense_hlo(platform, gpu_sparse, mat, *, nnz, index_dtype,
       data_dtype, index_dtype, rows, cols, nnz)
 
   out = custom_call(
-      f"{platform}sparse_csr_fromdense",
-      [
+      f"{platform}sparse_csr_fromdense_ffi",
+      result_types=[
           ir.RankedTensorType.get([nnz], mat_type.element_type),
           ir.RankedTensorType.get([nnz], index_type),
           ir.RankedTensorType.get([rows + 1], index_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [mat],
-      backend_config=opaque,
+      operands=[mat],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[1, 0]],
-      result_layouts=[[0]] * 4)
+      result_layouts=[[0]] * 4).results
   return out[:3]
 
 cuda_csr_fromdense = partial(_csr_fromdense_hlo, "cu", _cusparse)
@@ -140,16 +160,17 @@ def _csr_matvec_hlo(platform, gpu_sparse, data, indices, indptr, x, *, shape,
   out_size = cols if transpose else rows
 
   out = custom_call(
-      f"{platform}sparse_csr_matvec",
-      [
+      f"{platform}sparse_csr_matvec_ffi",
+      result_types=[
           ir.RankedTensorType.get([out_size], compute_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [data, indices, indptr, x],
-      backend_config=opaque,
+      operands=[data, indices, indptr, x],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[0]] * 4,
-      result_layouts=[[0]] * 2)
+      result_layouts=[[0]] * 2).results
   return out[0]
 
 cuda_csr_matvec = partial(_csr_matvec_hlo, "cu", _cusparse)
@@ -175,16 +196,17 @@ def _csr_matmat_hlo(platform, gpu_sparse, data, indices, indptr, B, *, shape,
   out_size = cols if transpose else rows
 
   out = custom_call(
-      f"{platform}sparse_csr_matmat",
-      [
+      f"{platform}sparse_csr_matmat_ffi",
+      result_types=[
           ir.RankedTensorType.get([out_size, Ccols], compute_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [data, indices, indptr, B],
-      backend_config=opaque,
+      operands=[data, indices, indptr, B],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[0], [0], [0], [1, 0]],
-      result_layouts=[[1, 0], [0]])
+      result_layouts=[[1, 0], [0]]).results
   return out[0]
 
 cuda_csr_matmat = partial(_csr_matmat_hlo, "cu", _cusparse)
@@ -201,16 +223,17 @@ def _coo_todense_hlo(platform, gpu_sparse, data, row, col, *, shape,
       data_dtype, index_dtype, rows, cols, nnz)
 
   out = custom_call(
-      f"{platform}sparse_coo_todense",
-      [
+      f"{platform}sparse_coo_todense_ffi",
+      result_types=[
           ir.RankedTensorType.get(shape, data_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [data, row, col],
-      backend_config=opaque,
+      operands=[data, row, col],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[0]] * 3,
-      result_layouts=[[1, 0], [0]])
+      result_layouts=[[1, 0], [0]]).results
   return out[0]
 
 cuda_coo_todense = partial(_coo_todense_hlo, "cu", _cusparse)
@@ -227,18 +250,19 @@ def _coo_fromdense_hlo(platform, gpu_sparse, mat, *, nnz, data_dtype,
       data_dtype, index_dtype, rows, cols, nnz)
 
   out = custom_call(
-      f"{platform}sparse_coo_fromdense",
-      [
+      f"{platform}sparse_coo_fromdense_ffi",
+      result_types=[
           ir.RankedTensorType.get([nnz], mat_type.element_type),
           ir.RankedTensorType.get([nnz], index_type),
           ir.RankedTensorType.get([nnz], index_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [mat],
-      backend_config=opaque,
+      operands=[mat],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[1, 0]],
-      result_layouts=[[0]] * 4)
+      result_layouts=[[0]] * 4).results
   return out[:3]
 
 cuda_coo_fromdense = partial(_coo_fromdense_hlo, "cu", _cusparse)
@@ -262,16 +286,17 @@ def _coo_matvec_hlo(platform, gpu_sparse, data, row, col, x, *, shape,
   out_size = cols if transpose else rows
 
   out = custom_call(
-      f"{platform}sparse_coo_matvec",
-      [
+      f"{platform}sparse_coo_matvec_ffi",
+      result_types=[
           ir.RankedTensorType.get([out_size], compute_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [data, row, col, x],
-      backend_config=opaque,
+      operands=[data, row, col, x],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[0]] * 4,
-      result_layouts=[[0]] * 2)
+      result_layouts=[[0]] * 2).results
   return out[0]
 
 cuda_coo_matvec = partial(_coo_matvec_hlo, "cu", _cusparse)
@@ -322,42 +347,56 @@ def _coo_matmat_hlo(platform, gpu_sparse, data, row, col, B, *, shape,
     out_layout = [1, 0]
 
   out = custom_call(
-      f"{platform}sparse_coo_matmat",
-      [
+      f"{platform}sparse_coo_matmat_ffi",
+      result_types=[
           ir.RankedTensorType.get(out_shape, compute_type),
           ir.RankedTensorType.get([buffer_size],
                                   ir.IntegerType.get_signless(8)),
       ],
-      [data, row, col, B],
-      backend_config=opaque,
+      operands=[data, row, col, B],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
       operand_layouts=[[0], [0], [0], [1, 0]],
-      result_layouts=[out_layout, [0]])
+      result_layouts=[out_layout, [0]]).results
   return out[0]
 
 cuda_coo_matmat = partial(_coo_matmat_hlo, "cu", _cusparse)
 rocm_coo_matmat = partial(_coo_matmat_hlo, "hip", _hipsparse)
 
 
-def _gtsv2_hlo(platform, gpu_sparse, dl, d, du, B, *, m, n, ldb, t):
+def _gtsv2_hlo(
+    platform, gpu_sparse, dl, d, du, B, *, m, n, ldb, t, b_shape_vals=None):
   """Calls `cusparse<t>gtsv2(dl, d, du, B, m, n, ldb)`."""
+  assert len(b_shape_vals) >= 2
+  batch_dim_vals = b_shape_vals[:-2]
+  batch_size = math.prod(batch_dim_vals)
+  num_bd = len(b_shape_vals) - 2
   f32 = (t == np.float32)
   if f32:
     buffer_size = gpu_sparse.gtsv2_f32_buffer_size(m, n, ldb)
   else:
     buffer_size = gpu_sparse.gtsv2_f64_buffer_size(m, n, ldb)
+
+  b_layout = (num_bd, num_bd + 1) + tuple(range(num_bd - 1, -1, -1))
+  d_layout = (num_bd,) + tuple(range(num_bd - 1, -1, -1))
+  b_type = ir.RankedTensorType(B.type)
+
+  shape_type_pairs = [
+      (batch_dim_vals + (ldb, n), b_type.element_type),
+      ((buffer_size,), ir.IntegerType.get_signless(8))
+  ]
+  result_types, result_shapes = mk_result_types_and_shapes(shape_type_pairs)
+  opaque = gpu_sparse.build_gtsv2_descriptor(batch_size, m, n, ldb)
   out = custom_call(
-      f"{platform}sparse_gtsv2_" + ("f32" if f32 else "f64"),
-      [
-          ir.RankedTensorType.get(
-              [ldb, n], ir.F32Type.get() if f32 else ir.F64Type.get()),
-          ir.RankedTensorType.get([buffer_size],
-                                  ir.IntegerType.get_signless(8)),
-      ],
-      [dl, d, du, B],
-      backend_config=gpu_sparse.build_gtsv2_descriptor(m, n, ldb),
-      operand_layouts=[[0]] * 3 + [[1, 0]],
-      result_layouts=[[1, 0], [0]],
-      operand_output_aliases={3: 0})
+      f"{platform}sparse_gtsv2_" + ("f32" if f32 else "f64") + "_ffi",
+      result_types=result_types,
+      operands=[dl, d, du, B],
+      backend_config={"opaque": ir.StringAttr.get(opaque)},
+      api_version=4,
+      operand_layouts=[d_layout] * 3 + [b_layout],
+      result_layouts=[b_layout, [0]],
+      operand_output_aliases={3: 0},
+      result_shapes=result_shapes).results
   return out[0]
 
 cuda_gtsv2 = partial(_gtsv2_hlo, "cu", _cusparse)

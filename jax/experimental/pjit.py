@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# flake8: noqa
+# ruff: noqa
 
-from jax._src.pjit import *
-from jax._src.pjit import (_UNSPECIFIED, _prepare_axis_resources,
-                           _get_op_sharding_from_executable,
-                           _get_pspec_from_executable, _pjit_lower_cached,
-                           _pjit_lower, _get_op_sharding,
-                           _calc_is_global_sequence, _pjit_jaxpr,
-                           _create_mesh_pspec_sharding_from_parsed_pspec,
-                           _process_in_axis_resources)
+from jax._src.pjit import (
+  pjit as pjit,
+  pjit_p as pjit_p,
+)
+from jax._src.sharding_impls import (
+  AUTO as AUTO,
+  UNSPECIFIED as _UNSPECIFIED,
+)
